@@ -1,0 +1,163 @@
+name: Terraform Infrastructure Deployment
+
+on:
+  push:
+    branches: [dev, staging, main]
+  pull_request:
+    branches: [dev, staging, main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - staging
+          - production
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: "1.5.0"
+          
+      - name: Terraform Validate
+        run: |
+          cd environments/${{ github.event.inputs.environment || github.ref_name }}
+          terraform init -backend=false
+          terraform validate
+          
+      - name: Security Scan
+        uses: aquasecurity/tfsec-action@v1.0.0
+        with:
+          format: sarif
+          
+      - name: Upload Security Results
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: results.sarif
+
+  plan:
+    runs-on: ubuntu-latest
+    needs: validate
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        
+      - name: Configure GCP
+        uses: google-github-actions/auth@v1
+        with:
+          credentials_json: ${{ secrets.GCP_CREDENTIALS }}
+          
+      - name: Terraform Plan
+        run: |
+          cd environments/${{ github.ref_name }}
+          terraform init
+          terraform plan -out=tfplan
+          
+      - name: Comment Plan
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const output = `#### Terraform Plan 📋
+            \`\`\`\n
+            ${process.env.PLAN || 'No changes. Infrastructure is up-to-date.'}
+            \`\`\`
+            *Pusher: @${{ github.actor }}, Action: \`${{ github.event_name }}\`*`;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            });
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: validate
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    environment: ${{ github.event.inputs.environment || github.ref_name == 'main' && 'production' || github.ref_name }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        
+      - name: Configure GCP
+        uses: google-github-actions/auth@v1
+        with:
+          credentials_json: ${{ secrets.GCP_CREDENTIALS }}
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+          
+      - name: Terraform Init
+        run: |
+          cd environments/${{ github.event.inputs.environment || github.ref_name }}
+          terraform init
+          
+      - name: Terraform Plan
+        run: |
+          cd environments/${{ github.event.inputs.environment || github.ref_name }}
+          terraform plan -out=tfplan
+          
+      - name: Terraform Apply
+        run: |
+          cd environments/${{ github.event.inputs.environment || github.ref_name }}
+          terraform apply tfplan
+          
+      - name: Get Infrastructure Outputs
+        run: |
+          cd environments/${{ github.event.inputs.environment || github.ref_name }}
+          terraform output -json > outputs.json
+          echo "INFRASTRUCTURE_OUTPUTS=$(cat outputs.json)" >> $GITHUB_ENV
+          
+      - name: Trigger AWX Deployment
+        if: env.INFRASTRUCTURE_OUTPUTS != ''
+        run: |
+          curl -X POST ${{ secrets.AWX_WEBHOOK_URL }} \
+            -H "Content-Type: application/json" \
+            -d "{\"environment\": \"${{ github.event.inputs.environment || github.ref_name }}\", \"infrastructure_outputs\": $INFRASTRUCTURE_OUTPUTS}"
+            
+      - name: Notify Success
+        run: |
+          echo "Infrastructure deployment completed successfully for ${{ github.event.inputs.environment || github.ref_name }}"
+          
+  rollback:
+    runs-on: ubuntu-latest
+    if: failure()
+    environment: ${{ github.event.inputs.environment || github.ref_name == 'main' && 'production' || github.ref_name }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        
+      - name: Configure GCP
+        uses: google-github-actions/auth@v1
+        with:
+          credentials_json: ${{ secrets.GCP_CREDENTIALS }}
+          
+      - name: Rollback Infrastructure
+        run: |
+          cd environments/${{ github.event.inputs.environment || github.ref_name }}
+          terraform init
+          terraform destroy -auto-approve
+          
+      - name: Notify Rollback
+        run: |
+          echo "Infrastructure rollback completed for ${{ github.event.inputs.environment || github.ref_name }}" 

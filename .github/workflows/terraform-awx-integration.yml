@@ -1,0 +1,96 @@
+name: Terraform + AWX Integration
+
+on:
+  push:
+    branches: [dev, staging, main]
+
+jobs:
+  deploy-infrastructure:
+    runs-on: ubuntu-latest
+    environment: ${{ github.ref_name == 'main' && 'production' || github.ref_name }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        
+      - name: Configure GCP
+        uses: google-github-actions/auth@v1
+        with:
+          credentials_json: ${{ secrets.GCP_CREDENTIALS }}
+          
+      - name: Terraform Init
+        run: |
+          cd environments/${{ github.ref_name }}
+          terraform init
+          
+      - name: Terraform Plan
+        run: |
+          cd environments/${{ github.ref_name }}
+          terraform plan -out=tfplan
+          
+      - name: Terraform Apply
+        run: |
+          cd environments/${{ github.ref_name }}
+          terraform apply tfplan
+          
+      - name: Get Terraform Outputs
+        id: outputs
+        run: |
+          cd environments/${{ github.ref_name }}
+          terraform output -json > outputs.json
+          echo "outputs=$(cat outputs.json)" >> $GITHUB_OUTPUT
+          
+      - name: Trigger AWX Job Template
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const outputs = JSON.parse('${{ steps.outputs.outputs }}');
+            
+            // Trigger AWX job template
+            const response = await github.request({
+              method: 'POST',
+              url: '${{ secrets.AWX_URL }}/api/v2/job_templates/${{ secrets.AWX_JOB_TEMPLATE_ID }}/launch/',
+              headers: {
+                'Authorization': `Bearer ${{ secrets.AWX_TOKEN }}`,
+                'Content-Type': 'application/json'
+              },
+              data: {
+                extra_vars: {
+                  environment: '${{ github.ref_name }}',
+                  infrastructure_outputs: outputs,
+                  terraform_state: '${{ github.ref_name }}'
+                }
+              }
+            });
+            
+            console.log('AWX job triggered:', response.data);
+            
+      - name: Wait for AWX Job Completion
+        uses: actions/github-script@v6
+        with:
+          script: |
+            // Poll AWX job status
+            const jobId = '${{ steps.awx.outputs.job_id }}';
+            let status = 'running';
+            
+            while (status === 'running') {
+              await new Promise(resolve => setTimeout(resolve, 10000)); // Wait 10 seconds
+              
+              const response = await github.request({
+                method: 'GET',
+                url: `${{ secrets.AWX_URL }}/api/v2/jobs/${jobId}/`,
+                headers: {
+                  'Authorization': `Bearer ${{ secrets.AWX_TOKEN }}`
+                }
+              });
+              
+              status = response.data.status;
+              console.log(`AWX job status: ${status}`);
+              
+              if (status === 'failed') {
+                core.setFailed('AWX job failed');
+              }
+            } 

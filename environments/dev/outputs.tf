@@ -66,6 +66,34 @@ output "core_lb_dns_name" {
   value       = module.dns.core_lb_dns_name
 }
 
+# AWX/Ansible Integration Outputs
+output "awx_inventory" {
+  description = "Inventory data for AWX/Ansible"
+  value = {
+    nginx_servers = {
+      load_balancer_ip = module.load_balancer.nginx_forwarding_rule_ip
+      load_balancer_url = module.load_balancer.nginx_load_balancer_url
+      instance_group_id = module.compute.nginx_instance_group_id
+      environment = "dev"
+    }
+    core_servers = {
+      load_balancer_ip = module.load_balancer.core_forwarding_rule_ip
+      load_balancer_url = module.load_balancer.core_load_balancer_url
+      instance_group_id = module.compute.core_instance_group_id
+      environment = "dev"
+    }
+    infrastructure = {
+      vpc_id = module.networking.vpc_id
+      vpc_name = module.networking.vpc_name
+      public_subnet_id = module.networking.public_subnet_id
+      private_subnet_id = module.networking.private_subnet_id
+      dns_zone_id = module.dns.dns_zone_id
+      region = var.region
+      zone = var.zone
+    }
+  }
+}
+
 # Summary Outputs
 output "infrastructure_summary" {
   description = "Summary of the deployed infrastructure"
